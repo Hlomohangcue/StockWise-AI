@@ -53,6 +53,28 @@ def test_database_initialization_creates_tables_and_parent_directory(tmp_path):
         test_engine.dispose()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite://", "sqlite:///:memory:"])
+def test_sqlite_connection_timeout_is_explicit_for_memory_databases(database_url):
+    test_engine = create_database_engine(database_url)
+    try:
+        with test_engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 10_000
+    finally:
+        test_engine.dispose()
+
+
+def test_sqlite_connection_timeout_can_be_shortened_for_contention_tests(tmp_path):
+    database_file = tmp_path / "short-timeout.db"
+    test_engine = create_database_engine(
+        f"sqlite:///{database_file.as_posix()}", sqlite_timeout_seconds=0.05
+    )
+    try:
+        with test_engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 50
+    finally:
+        test_engine.dispose()
+
+
 def test_database_url_environment_override_configures_application_engine(tmp_path):
     database_file = tmp_path / "override.db"
     database_url = f"sqlite:///{database_file.as_posix()}"

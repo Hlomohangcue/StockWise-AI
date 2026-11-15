@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from backend.app.api.v1.products import router as products_router
+from backend.app.api.v1.inventory import router as inventory_router
 from backend.app.database import Base, engine
 
 
@@ -21,6 +22,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(products_router, prefix="/api/v1")
+app.include_router(inventory_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["Health"])
