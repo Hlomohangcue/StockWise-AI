@@ -93,7 +93,7 @@ def _is_sqlite_busy(error: OperationalError) -> bool:
     return "database is locked" in message or "database is busy" in message or "database table is locked" in message
 
 
-def _run_write_transaction(session: Session, operation: Callable[[], T]) -> T:
+def run_inventory_write_transaction(session: Session, operation: Callable[[], T]) -> T:
     """Run an inventory write as one serialized SQLite transaction.
 
     The caller must provide a Session with no active transaction. This method
@@ -196,6 +196,51 @@ def _movement_record(session: Session, movement: StockMovement) -> MovementRecor
     )
 
 
+def issue_stock_in_transaction(
+    session: Session,
+    *,
+    product_id: int,
+    quantity: Decimal,
+    reason: str | None = None,
+    reference: str | None = None,
+) -> InventoryOperation:
+    """Issue stock inside a caller-owned inventory write transaction.
+
+    The caller must run this within ``run_inventory_write_transaction``. This
+    function validates and applies the same balance and movement rules as
+    ``issue_stock`` but deliberately does not begin, commit, or roll back.
+    """
+    if not session.in_transaction():
+        raise RuntimeError("A caller-owned inventory write transaction is required.")
+
+    _validate_quantity(quantity)
+    product = _get_product(session, product_id)
+    balance = session.scalar(
+        select(InventoryBalance).where(InventoryBalance.product_id == product_id)
+    )
+    before = balance.quantity_on_hand if balance is not None else Decimal("0.000")
+    if quantity > before:
+        raise InsufficientStockError
+
+    after = before - quantity
+    if balance is None:
+        balance = InventoryBalance(product_id=product_id, quantity_on_hand=after)
+        session.add(balance)
+    else:
+        balance.quantity_on_hand = after
+    movement = _new_movement(
+        product_id=product_id,
+        movement_type="ISSUE",
+        quantity=quantity,
+        before=before,
+        after=after,
+        reason=reason,
+        reference=reference,
+    )
+    session.add(movement)
+    return InventoryOperation(_product_info(product), after, _movement_record(session, movement))
+
+
 def receive_stock(
     session: Session,
     *,
@@ -224,7 +269,7 @@ def receive_stock(
         session.add(movement)
         return InventoryOperation(_product_info(product), after, _movement_record(session, movement))
 
-    return _run_write_transaction(session, operation)
+    return run_inventory_write_transaction(session, operation)
 
 
 def issue_stock(
@@ -237,34 +282,16 @@ def issue_stock(
 ) -> InventoryOperation:
     _validate_quantity(quantity)
 
-    def operation() -> InventoryOperation:
-        product = _get_product(session, product_id)
-        balance = session.scalar(
-            select(InventoryBalance).where(InventoryBalance.product_id == product_id)
-        )
-        before = balance.quantity_on_hand if balance is not None else Decimal("0.000")
-        if quantity > before:
-            raise InsufficientStockError
-
-        after = before - quantity
-        if balance is None:
-            balance = InventoryBalance(product_id=product_id, quantity_on_hand=after)
-            session.add(balance)
-        else:
-            balance.quantity_on_hand = after
-        movement = _new_movement(
+    return run_inventory_write_transaction(
+        session,
+        lambda: issue_stock_in_transaction(
+            session,
             product_id=product_id,
-            movement_type="ISSUE",
             quantity=quantity,
-            before=before,
-            after=after,
             reason=reason,
             reference=reference,
-        )
-        session.add(movement)
-        return InventoryOperation(_product_info(product), after, _movement_record(session, movement))
-
-    return _run_write_transaction(session, operation)
+        ),
+    )
 
 
 def adjust_stock(
@@ -309,7 +336,7 @@ def adjust_stock(
             _movement_record(session, movement),
         )
 
-    return _run_write_transaction(session, operation)
+    return run_inventory_write_transaction(session, operation)
 
 
 def get_balance(session: Session, product_id: int) -> InventoryOperation:
